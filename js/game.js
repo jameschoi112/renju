@@ -133,35 +133,61 @@ export function aiTurn() {
   }, 20);
 }
 
+/** 화면 좌표 → 캔버스 좌표 (반응형 스케일 반영) */
+function toCanvasCoords(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    canvasX: (clientX - rect.left) * scaleX,
+    canvasY: (clientY - rect.top) * scaleY,
+  };
+}
+
+function handleCanvasPoint(canvas, clientX, clientY) {
+  const { canvasX, canvasY } = toCanvasCoords(canvas, clientX, clientY);
+  const col = snap(canvasX);
+  const row = snap(canvasY);
+  if (!inBound(row, col) || board[row][col] !== 0) return;
+
+  // AI 선공(custom): 첫 수 위치만 사용자가 지정
+  if (waitingForFirstMovePosition) {
+    doPlace(board, row, col, BLACK);
+    moveHistory.push([row, col]);
+    lastMove = [row, col];
+    lastMoveAI = [row, col];
+    turn = WHITE;
+    waitingForFirstMovePosition = false;
+    draw(getCtx(), board, lastMoveHuman, lastMoveAI, turn, gameOver);
+    setStatus('백의 차례');
+    return;
+  }
+
+  const humanColor = getHumanColor();
+  if (gameOver || aiThinking || turn !== humanColor) return;
+  if (humanColor === BLACK && forbidden(board, row, col)) {
+    setStatus('금수! 다른 곳에 두세요 ✕');
+    return;
+  }
+  doPlace(board, row, col, humanColor);
+  afterPlace(row, col, humanColor);
+}
+
 export function setupClick(canvas) {
   canvas.addEventListener('click', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const col = snap(e.clientX - rect.left);
-    const row = snap(e.clientY - rect.top);
-    if (!inBound(row, col) || board[row][col] !== 0) return;
-
-    // AI 선공(custom): 첫 수 위치만 사용자가 지정
-    if (waitingForFirstMovePosition) {
-      doPlace(board, row, col, BLACK);
-      moveHistory.push([row, col]);
-      lastMove = [row, col];
-      lastMoveAI = [row, col];
-      turn = WHITE;
-      waitingForFirstMovePosition = false;
-      draw(getCtx(), board, lastMoveHuman, lastMoveAI, turn, gameOver);
-      setStatus('백의 차례');
-      return;
-    }
-
-    const humanColor = getHumanColor();
-    if (gameOver || aiThinking || turn !== humanColor) return;
-    if (humanColor === BLACK && forbidden(board, row, col)) {
-      setStatus('금수! 다른 곳에 두세요 ✕');
-      return;
-    }
-    doPlace(board, row, col, humanColor);
-    afterPlace(row, col, humanColor);
+    handleCanvasPoint(canvas, e.clientX, e.clientY);
   });
+  canvas.addEventListener(
+    'touchend',
+    (e) => {
+      if (e.changedTouches && e.changedTouches[0]) {
+        e.preventDefault();
+        const t = e.changedTouches[0];
+        handleCanvasPoint(canvas, t.clientX, t.clientY);
+      }
+    },
+    { passive: false }
+  );
 }
 
 function updateFirstButtons() {
