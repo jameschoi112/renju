@@ -15,9 +15,11 @@ const history = Array.from({ length: N }, () => new Int32Array(N));
 const killer = [];
 for (let i = 0; i <= 20; i++) killer.push([null, null]);
 
-const MAX_CANDIDATES = 30;
-const MAX_DEPTH = 14;
+const MAX_CANDIDATES = 28;
+const MAX_DEPTH = 12;
 const BOOK_MAX_MOVES = 6;
+/** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환해 페이지 멈춤 방지 (생각 시간 늘리면 더 강해짐) */
+const MAX_AI_MS = 6000;
 
 /** 오프닝 북: 수 순서 문자열 -> [r,c] (렌주 정석 기반) */
 const OPENING_BOOK = new Map([
@@ -261,25 +263,28 @@ export function bestMove(board, aiColor, moveHistory = []) {
     b[r][c] = 0;
   }
 
-  const vcf = vcfWin(b, aiColor, 10);
+  const vcf = vcfWin(b, aiColor, 8);
   if (vcf) return vcf;
 
   for (const [r, c] of cands) {
     if (aiColor === BLACK && forbidden(b, r, c)) continue;
     const tmp = copyBoard(b);
     tmp[r][c] = opp;
-    if (vcfWin(tmp, opp, 8)) return [r, c];
+    if (vcfWin(tmp, opp, 6)) return [r, c];
   }
 
   let bestPos = cands[0];
   let bestScore = -Infinity;
+  const startMs = Date.now();
 
   for (let d = 2; d <= MAX_DEPTH; d += 2) {
+    if (Date.now() - startMs > MAX_AI_MS) break;
     const ordered = candidates(b, aiColor, 0, bestPos);
     let depthBest = ordered[0];
     let depthScore = -Infinity;
 
     for (const [r, c] of ordered) {
+      if (Date.now() - startMs > MAX_AI_MS) break;
       if (aiColor === BLACK && forbidden(b, r, c)) continue;
       b[r][c] = aiColor;
       const h = getHash(b);
