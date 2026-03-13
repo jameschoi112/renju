@@ -2,7 +2,7 @@
  * AI: 최상급 엔진 — TT, 반복적 심화, VCF/VCT, 오프닝 북, 히스토리/킬러
  */
 import { N, WHITE, BLACK, S, EMPTY } from './constants.js';
-import { inBound, copyBoard } from './board.js';
+import { inBound, copyBoard, getFirstEmptyCell } from './board.js';
 import { scanLine, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
 import { patternScore, evalBoard } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
@@ -146,13 +146,20 @@ export function forcedReplies(b, r, c, color) {
   return Array.from(set).map(key => [(key / N) | 0, key % N]);
 }
 
-/** VCF — 열린 4만 강제로 간주 (렌주 정석). 즉승·더블포는 기존대로 */
-export function vcfWin(b, color, depth, candList = null) {
+/** 시간 초과 시 true (타임아웃 방지용) */
+function isOverTime(startMs, limitMs) {
+  return limitMs != null && (Date.now() - startMs) > limitMs;
+}
+
+/** VCF — 열린 4만 강제로 간주 (렌주 정석). 즉승·더블포는 기존대로. timeLimit 있으면 초과 시 null 반환 */
+export function vcfWin(b, color, depth, candList = null, timeStart = null, timeLimit = null) {
   if (depth <= 0) return null;
+  if (isOverTime(timeStart, timeLimit)) return null;
   const opp = 3 - color;
   const order = candList || candidates(b, color, 0).slice(0, 28);
 
   for (const [r, c] of order) {
+    if (isOverTime(timeStart, timeLimit)) return null;
     if (b[r][c] !== 0) continue;
     if (color === BLACK && forbidden(b, r, c)) continue;
     b[r][c] = color;
@@ -165,9 +172,10 @@ export function vcfWin(b, color, depth, candList = null) {
       const defMoves = forcedRepliesOpenFour(b, r, c, color);
       let allWin = true;
       for (const [mr, mc] of defMoves) {
+        if (isOverTime(timeStart, timeLimit)) { allWin = false; break; }
         if (b[mr][mc] !== 0) continue;
         b[mr][mc] = opp;
-        const w = vcfWin(b, color, depth - 1);
+        const w = vcfWin(b, color, depth - 1, null, timeStart, timeLimit);
         b[mr][mc] = 0;
         if (!w) { allWin = false; break; }
       }
@@ -280,10 +288,22 @@ export function resetAI() {
 
 /**
  * 최선 수 선택 (최상급): 오프닝 → 즉승 → 방어 → VCF → 상대 VCF 방어 → 반복적 심화 Minimax
+ * 전체에 MAX_AI_MS 타임아웃 적용해 간헐적 멈춤 방지.
+ * try-catch로 예외 시에도 유효한 수 반환해 페이지 크래시 방지.
  */
 export function bestMove(board, aiColor, moveHistory = []) {
+  try {
+    return bestMoveInner(board, aiColor, moveHistory);
+  } catch (err) {
+    console.error('AI bestMove 오류:', err);
+    return getFirstEmptyCell(board);
+  }
+}
+
+function bestMoveInner(board, aiColor, moveHistory) {
   const opp = 3 - aiColor;
   const b = copyBoard(board);
+  const startMs = Date.now();
 
   const key = bookKey(moveHistory);
   if (key.length <= BOOK_MAX_MOVES * 3 && OPENING_BOOK.has(key)) {
@@ -308,19 +328,21 @@ export function bestMove(board, aiColor, moveHistory = []) {
     b[r][c] = 0;
   }
 
-  const vcf = vcfWin(b, aiColor, 8);
-  if (vcf) return vcf;
+  if (!isOverTime(startMs, MAX_AI_MS)) {
+    const vcf = vcfWin(b, aiColor, 8, null, startMs, MAX_AI_MS);
+    if (vcf) return vcf;
+  }
 
   for (const [r, c] of cands) {
+    if (isOverTime(startMs, MAX_AI_MS)) break;
     if (aiColor === BLACK && forbidden(b, r, c)) continue;
     const tmp = copyBoard(b);
     tmp[r][c] = opp;
-    if (vcfWin(tmp, opp, 6)) return [r, c];
+    if (vcfWin(tmp, opp, 6, null, startMs, MAX_AI_MS)) return [r, c];
   }
 
   let bestPos = cands[0];
   let bestScore = -Infinity;
-  const startMs = Date.now();
 
   for (let d = 2; d <= MAX_DEPTH; d += 2) {
     if (Date.now() - startMs > MAX_AI_MS) break;

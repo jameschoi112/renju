@@ -35,3 +35,14 @@ export function boardFull(board) {
   }
   return true;
 }
+
+/** 빈 칸 하나 반환 (예외 시 폴백용). 없으면 [7,7] */
+export function getFirstEmptyCell(board) {
+  if (board[7][7] === EMPTY) return [7, 7];
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (board[r][c] === EMPTY) return [r, c];
+    }
+  }
+  return [7, 7];
+}

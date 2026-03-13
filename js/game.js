@@ -2,7 +2,7 @@
  * 게임 흐름: 착수, 턴, 클릭 처리
  */
 import { BLACK, WHITE } from './constants.js';
-import { createBoard, boardFull, snap, inBound } from './board.js';
+import { createBoard, boardFull, snap, inBound, getFirstEmptyCell } from './board.js';
 import { checkWin, forbidden } from './rules.js';
 import { draw } from './draw.js';
 import { drawWinLine } from './draw.js';
@@ -126,10 +126,20 @@ export function aiTurn() {
       afterPlace(r, c, aiColor);
     } catch (err) {
       console.error('AI 수 계산 중 오류:', err);
-      setStatus('AI 오류 발생');
-    } finally {
+      setStatus('AI 오류 발생, 복구 시도…');
+      try {
+        const [fr, fc] = getFirstEmptyCell(board);
+        doPlace(board, fr, fc, aiColor);
+        afterPlace(fr, fc, aiColor);
+        setStatus(aiColor === BLACK ? '백의 차례' : '흑의 차례');
+      } catch (e2) {
+        console.error('AI 복구 실패:', e2);
+        setStatus('AI 오류 발생');
+      }
       aiThinking = false;
+      return;
     }
+    aiThinking = false;
   }, 20);
 }
 
