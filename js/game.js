@@ -26,6 +26,21 @@ export let lastMoveHuman = null;
 /** AI가 둔 마지막 수 [r, c] */
 export let lastMoveAI = null;
 
+let toastTimerId = null;
+
+function showToast(message) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.add('show');
+}
+
+function hideToast() {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.classList.remove('show');
+}
+
 /** AI 선공이면 AI=흑, 플레이어=백 / 아니면 AI=백, 플레이어=흑 */
 export function getAiColor() {
   return aiFirst ? BLACK : WHITE;
@@ -48,6 +63,7 @@ export function resetGame() {
   lastMoveHuman = null;
   lastMoveAI = null;
   waitingForFirstMovePosition = false;
+  hideToast();
   resetAI();
   draw(getCtx(), board, lastMoveHuman, lastMoveAI, turn, gameOver);
   updateLegend();
@@ -103,11 +119,13 @@ export function afterPlace(r, c, color) {
     const colorName = color === BLACK ? '흑' : '백';
     setStatus(`${colorName}(${isAiWin ? 'AI' : '플레이어'}) 승리! 🎉`);
     drawWinLine(getCtx(), board, r, c, color);
+    hideToast();
     return;
   }
   if (boardFull(board)) {
     gameOver = true;
     setStatus('무승부!');
+    hideToast();
     return;
   }
   turn = 3 - color;
@@ -119,6 +137,7 @@ export function aiTurn() {
   const aiColor = getAiColor();
   setStatus(aiColor === BLACK ? '흑(AI) 생각 중...' : '백(AI) 생각 중...');
   aiThinking = true;
+  showToast(aiColor === BLACK ? '흑(AI)이 수를 계산 중입니다…' : '백(AI)이 수를 계산 중입니다…');
   setTimeout(() => {
     try {
       const [r, c] = bestMove(board, aiColor, moveHistory);
@@ -137,9 +156,11 @@ export function aiTurn() {
         setStatus('AI 오류 발생');
       }
       aiThinking = false;
+      hideToast();
       return;
     }
     aiThinking = false;
+    hideToast();
   }, 20);
 }
 
