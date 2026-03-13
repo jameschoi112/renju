@@ -6,6 +6,7 @@ import { inBound, copyBoard, getFirstEmptyCell } from './board.js';
 import { scanLine, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
 import { patternScore, evalBoard } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
+import { OPENING_BOOK, BOOK_MAX_MOVES } from './opening-book.js';
 
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 
@@ -17,29 +18,12 @@ for (let i = 0; i <= 20; i++) killer.push([null, null]);
 
 const MAX_CANDIDATES = 28;
 const MAX_DEPTH = 12;
-const BOOK_MAX_MOVES = 6;
 /** LMR: 이 수 이후부터 감소 탐색 시도. 감소 깊이로 컷되면 전깊이 재탐색 */
 const LMR_MOVE_THRESHOLD = 3;
 const LMR_MIN_DEPTH = 5;
 const LMR_REDUCTION = 2;
-/** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환해 페이지 멈춤 방지 (생각 시간 늘리면 더 강해짐) */
-const MAX_AI_MS = 6000;
-
-/** 오프닝 북: 수 순서 문자열 -> [r,c] (렌주 정석 기반) */
-const OPENING_BOOK = new Map([
-  ['', [7, 7]],
-  ['7,7', [7, 8]],
-  ['7,7,7,8', [8, 7]],
-  ['7,7,8,7', [7, 8]],
-  ['7,7,7,8,8,7', [6, 7]],
-  ['7,7,7,8,6,7', [8, 7]],
-  ['7,7,8,7,7,8', [6, 8]],
-  ['7,7,8,7,6,8', [7, 8]],
-  ['7,7,7,8,8,7,6,7', [8, 8]],
-  ['7,7,7,8,8,7,8,8', [6, 6]],
-  ['7,7,8,7,7,8,6,8', [8, 6]],
-  ['7,7,8,7,7,8,8,6', [6, 8]],
-]);
+/** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 (늘리면 더 강함, 전문가용 10000~15000) */
+const MAX_AI_MS = 10000;
 
 function bookKey(moveHistory) {
   if (!moveHistory || moveHistory.length === 0) return '';
@@ -306,7 +290,7 @@ function bestMoveInner(board, aiColor, moveHistory) {
   const startMs = Date.now();
 
   const key = bookKey(moveHistory);
-  if (key.length <= BOOK_MAX_MOVES * 3 && OPENING_BOOK.has(key)) {
+  if (moveHistory.length <= BOOK_MAX_MOVES && OPENING_BOOK.has(key)) {
     const bookMove = OPENING_BOOK.get(key);
     if (b[bookMove[0]][bookMove[1]] === 0) return bookMove;
   }
