@@ -1,0 +1,299 @@
+/**
+ * AI: 최상급 엔진 — TT, 반복적 심화, VCF/VCT, 오프닝 북, 히스토리/킬러
+ */
+import { N, WHITE, BLACK, S } from './constants.js';
+import { inBound, copyBoard } from './board.js';
+import { scanLine, checkWin, forbidden, countFours, isInstantWin } from './rules.js';
+import { patternScore, evalBoard } from './eval.js';
+import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
+
+const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+
+// 히스토리 휴리스틱 (착수별 컷오프 기여도)
+const history = Array.from({ length: N }, () => new Int32Array(N));
+// 킬러 이동 (깊이별 최근 컷오프 수 2개)
+const killer = [];
+for (let i = 0; i <= 20; i++) killer.push([null, null]);
+
+const MAX_CANDIDATES = 30;
+const MAX_DEPTH = 14;
+const BOOK_MAX_MOVES = 6;
+
+/** 오프닝 북: 수 순서 문자열 -> [r,c] (렌주 정석 기반) */
+const OPENING_BOOK = new Map([
+  ['', [7, 7]],
+  ['7,7', [7, 8]],
+  ['7,7,7,8', [8, 7]],
+  ['7,7,8,7', [7, 8]],
+  ['7,7,7,8,8,7', [6, 7]],
+  ['7,7,7,8,6,7', [8, 7]],
+  ['7,7,8,7,7,8', [6, 8]],
+  ['7,7,8,7,6,8', [7, 8]],
+  ['7,7,7,8,8,7,6,7', [8, 8]],
+  ['7,7,7,8,8,7,8,8', [6, 6]],
+  ['7,7,8,7,7,8,6,8', [8, 6]],
+  ['7,7,8,7,7,8,8,6', [6, 8]],
+]);
+
+function bookKey(moveHistory) {
+  if (!moveHistory || moveHistory.length === 0) return '';
+  return moveHistory.map(([r, c]) => `${r},${c}`).join(',');
+}
+
+/**
+ * 후보 수: 기존 돌 주변 2칸, 휴리스틱+히스토리+킬러 정렬, 상위 MAX_CANDIDATES개
+ */
+export function candidates(b, perspective = WHITE, depth = 0, preferMove = null) {
+  const set = new Set();
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (b[r][c] === 0) continue;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          if (!dr && !dc) continue;
+          const nr = r + dr, nc = c + dc;
+          if (inBound(nr, nc) && b[nr][nc] === 0) set.add(nr * N + nc);
+        }
+      }
+    }
+  }
+  if (set.size === 0) return [[7, 7]];
+
+  const arr = [];
+  for (const key of set) {
+    const r = (key / N) | 0, c = key % N;
+    let wScore = 0, bScore = 0;
+    for (const [dr, dc] of DIRS) {
+      b[r][c] = WHITE;
+      const { cnt: wc, openF: wf, openB: wb } = scanLine(b, r, c, dr, dc, WHITE);
+      wScore += patternScore(wc, wf + wb, true);
+      b[r][c] = BLACK;
+      const { cnt: bc, openF: bf, openB: bb } = scanLine(b, r, c, dr, dc, BLACK);
+      bScore += patternScore(bc, bf + bb, false);
+      b[r][c] = 0;
+    }
+    const hist = history[r][c] || 0;
+    arr.push([r, c, wScore, bScore, hist]);
+  }
+  const keyPers = perspective === BLACK ? (a) => 2 * a[3] + a[2] : (a) => 2 * a[2] + a[3];
+  const killer0 = depth > 0 && killer[depth] ? killer[depth][0] : null;
+  const killer1 = depth > 0 && killer[depth] ? killer[depth][1] : null;
+  arr.sort((a, b) => {
+    if (preferMove && (a[0] === preferMove[0] && a[1] === preferMove[1])) return -1;
+    if (preferMove && (b[0] === preferMove[0] && b[1] === preferMove[1])) return 1;
+    let boostA = (a[4] || 0), boostB = (b[4] || 0);
+    if (killer0 && a[0] === killer0[0] && a[1] === killer0[1]) boostA += 100000;
+    if (killer1 && a[0] === killer1[0] && a[1] === killer1[1]) boostA += 50000;
+    if (killer0 && b[0] === killer0[0] && b[1] === killer0[1]) boostB += 100000;
+    if (killer1 && b[0] === killer1[0] && b[1] === killer1[1]) boostB += 50000;
+    const scoreA = keyPers(a) * 1000 + boostA;
+    const scoreB = keyPers(b) * 1000 + boostB;
+    return scoreB - scoreA;
+  });
+  const raw = arr.slice(0, MAX_CANDIDATES).map(([r, c]) => [r, c]);
+  if (preferMove && !raw.some(([r, c]) => r === preferMove[0] && c === preferMove[1])) {
+    const out = raw.slice(0, -1);
+    out.unshift(preferMove);
+    return out;
+  }
+  return raw;
+}
+
+/** 4목 위협에 대한 필수 응수 위치 (중복 제거) */
+export function forcedReplies(b, r, c, color) {
+  const set = new Set();
+  for (const [dr, dc] of DIRS) {
+    const { cnt } = scanLine(b, r, c, dr, dc, color);
+    if (cnt < 4) continue;
+    let rr = r + dr, rc = c + dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr += dr; rc += dc; }
+    if (inBound(rr, rc) && b[rr][rc] === 0) set.add(rr * N + rc);
+    rr = r - dr; rc = c - dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr -= dr; rc -= dc; }
+    if (inBound(rr, rc) && b[rr][rc] === 0) set.add(rr * N + rc);
+  }
+  return Array.from(set).map(key => [(key / N) | 0, key % N]);
+}
+
+/** VCF — 연속 4목/더블포 강제승 (후보 수 우선 탐색) */
+export function vcfWin(b, color, depth, candList = null) {
+  if (depth <= 0) return null;
+  const opp = 3 - color;
+  const order = candList || candidates(b, color, 0).slice(0, 28);
+
+  for (const [r, c] of order) {
+    if (b[r][c] !== 0) continue;
+    if (color === BLACK && forbidden(b, r, c)) continue;
+    b[r][c] = color;
+    if (isInstantWin(b, r, c, color)) {
+      b[r][c] = 0;
+      return [r, c];
+    }
+    const fourCount = countFours(b, r, c, color);
+    if (fourCount >= 1) {
+      const defMoves = forcedReplies(b, r, c, color);
+      let allWin = true;
+      for (const [mr, mc] of defMoves) {
+        if (b[mr][mc] !== 0) continue;
+        b[mr][mc] = opp;
+        const w = vcfWin(b, color, depth - 1);
+        b[mr][mc] = 0;
+        if (!w) { allWin = false; break; }
+      }
+      if (allWin && defMoves.length > 0) {
+        b[r][c] = 0;
+        return [r, c];
+      }
+    }
+    b[r][c] = 0;
+  }
+  return null;
+}
+
+const Exact = 0, Lower = 1, Upper = 2;
+
+/** Minimax + Alpha-Beta + TT + 히스토리/킬러 */
+function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
+  const opp = 3 - aiColor;
+  const rawScore = evalBoard(b);
+  const score = aiColor === WHITE ? rawScore : -rawScore;
+
+  if (Math.abs(score) >= S.WIN) return score;
+  if (depth === 0) return score;
+
+  const cached = ttGet(hash, depth, alpha, beta);
+  if (cached !== null) return cached;
+
+  const ttMove = ttGetMove(hash);
+  const cands = candidates(b, isMax ? aiColor : opp, depth, ttMove);
+  let bestScore = isMax ? -Infinity : Infinity;
+  let bestMove = null;
+  let flag = Upper;
+
+  if (isMax) {
+    for (const [r, c] of cands) {
+      if (aiColor === BLACK && forbidden(b, r, c)) continue;
+      b[r][c] = aiColor;
+      const h2 = updateHash(hash, r, c, aiColor);
+      const sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+      b[r][c] = 0;
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestMove = [r, c];
+        flag = Exact;
+        alpha = Math.max(alpha, sc);
+      }
+      if (beta <= alpha) {
+        history[r][c] += depth * depth;
+        killer[depth][1] = killer[depth][0];
+        killer[depth][0] = [r, c];
+        break;
+      }
+    }
+  } else {
+    for (const [r, c] of cands) {
+      if (opp === BLACK && forbidden(b, r, c)) continue;
+      b[r][c] = opp;
+      const h2 = updateHash(hash, r, c, opp);
+      const sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+      b[r][c] = 0;
+      if (sc < bestScore) {
+        bestScore = sc;
+        bestMove = [r, c];
+        flag = Exact;
+        beta = Math.min(beta, sc);
+      }
+      if (beta <= alpha) {
+        history[r][c] += depth * depth;
+        killer[depth][1] = killer[depth][0];
+        killer[depth][0] = [r, c];
+        break;
+      }
+    }
+  }
+
+  ttPut(hash, depth, bestScore, flag, bestMove);
+  return bestScore;
+}
+
+export function isCritical(b, r, c, color = WHITE) {
+  for (const [dr, dc] of DIRS) {
+    const { cnt } = scanLine(b, r, c, dr, dc, color);
+    if (cnt >= 3) return true;
+  }
+  return false;
+}
+
+/** 게임 시작 시 TT·히스토리 초기화 (game에서 reset 시 호출 권장) */
+export function resetAI() {
+  ttClear();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) history[r][c] = 0;
+  for (let i = 0; i < killer.length; i++) killer[i][0] = killer[i][1] = null;
+}
+
+/**
+ * 최선 수 선택 (최상급): 오프닝 → 즉승 → 방어 → VCF → 상대 VCF 방어 → 반복적 심화 Minimax
+ */
+export function bestMove(board, aiColor, moveHistory = []) {
+  const opp = 3 - aiColor;
+  const b = copyBoard(board);
+
+  const key = bookKey(moveHistory);
+  if (key.length <= BOOK_MAX_MOVES * 3 && OPENING_BOOK.has(key)) {
+    const bookMove = OPENING_BOOK.get(key);
+    if (b[bookMove[0]][bookMove[1]] === 0) return bookMove;
+  }
+
+  const cands = candidates(b, aiColor);
+
+  for (const [r, c] of cands) {
+    b[r][c] = aiColor;
+    if (checkWin(b, r, c, aiColor)) { b[r][c] = 0; return [r, c]; }
+    if (countFours(b, r, c, aiColor) >= 2) { b[r][c] = 0; return [r, c]; }
+    b[r][c] = 0;
+  }
+
+  for (const [r, c] of cands) {
+    if (opp === BLACK && forbidden(b, r, c)) continue;
+    b[r][c] = opp;
+    if (checkWin(b, r, c, opp)) { b[r][c] = 0; return [r, c]; }
+    if (countFours(b, r, c, opp) >= 2) { b[r][c] = 0; return [r, c]; }
+    b[r][c] = 0;
+  }
+
+  const vcf = vcfWin(b, aiColor, 10);
+  if (vcf) return vcf;
+
+  for (const [r, c] of cands) {
+    if (aiColor === BLACK && forbidden(b, r, c)) continue;
+    const tmp = copyBoard(b);
+    tmp[r][c] = opp;
+    if (vcfWin(tmp, opp, 8)) return [r, c];
+  }
+
+  let bestPos = cands[0];
+  let bestScore = -Infinity;
+
+  for (let d = 2; d <= MAX_DEPTH; d += 2) {
+    const ordered = candidates(b, aiColor, 0, bestPos);
+    let depthBest = ordered[0];
+    let depthScore = -Infinity;
+
+    for (const [r, c] of ordered) {
+      if (aiColor === BLACK && forbidden(b, r, c)) continue;
+      b[r][c] = aiColor;
+      const h = getHash(b);
+      const depthUse = isCritical(b, r, c, aiColor) ? Math.min(d + 2, MAX_DEPTH) : d;
+      const sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
+      b[r][c] = 0;
+      if (sc > depthScore) {
+        depthScore = sc;
+        depthBest = [r, c];
+      }
+    }
+    bestScore = depthScore;
+    bestPos = depthBest;
+  }
+
+  return bestPos;
+}
