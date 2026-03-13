@@ -3,7 +3,7 @@
  */
 import { N, WHITE, BLACK, S, EMPTY } from './constants.js';
 import { inBound, copyBoard, getFirstEmptyCell } from './board.js';
-import { scanLine, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
+import { scanLine, lineType, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
 import { patternScore, evalBoard } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
 
@@ -22,11 +22,16 @@ const LMR_MOVE_THRESHOLD = 3;
 const LMR_MIN_DEPTH = 5;
 const LMR_REDUCTION = 2;
 /** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 (늘리면 더 강함, 전문가용 10000~15000) */
-const MAX_AI_MS = 10000;
+const MAX_AI_MS = 12000;
+/** 막으면서 공격하는 수(이중목적) 보너스 — 우리 쪽 형태가 이 점수 이상일 때만 적용 */
+const DUAL_PURPOSE_THRESHOLD = S.C2;
+const DUAL_PURPOSE_BONUS = 80000;
 
-/** 렌주 정석 오프닝 북 (26오프닝 + 주요 변주) */
+/** 렌주 정석 오프닝 북 (확장: 26오프닝 + 변주 + 깊은 라인) */
 const OPENING_BOOK_ENTRIES = [
+  // --- 1수: 천원 ---
   ['', [7, 7]],
+  // --- 2수: 직지(7,8) 대비 ---
   ['7,7', [7, 8]],
   ['7,7,7,8', [8, 7]],
   ['7,7,7,8,8,7', [6, 7]],
@@ -41,6 +46,29 @@ const OPENING_BOOK_ENTRIES = [
   ['7,7,7,8,8,7,6,6,6,7', [8, 8]],
   ['7,7,7,8,6,7,8,7', [6, 7]],
   ['7,7,7,8,6,7,8,7,6,7', [8, 8]],
+  // 직지 6,6 대진 깊은 라인
+  ['7,7,7,8,8,7,6,7,8,8,6,6', [5, 5]],
+  ['7,7,7,8,8,7,6,7,8,8,5,5', [7, 7]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5', [6, 5]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,6,5', [4, 6]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5,6,5', [5, 6]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5,5,6', [6, 4]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,6,5,4,6', [5, 5]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,6,5,5,5', [7, 5]],
+  // 직지 6,6 8,6 변주
+  ['7,7,7,8,8,7,6,7,6,6,8,6', [7, 5]],
+  ['7,7,7,8,8,7,6,7,6,6,7,5', [9, 7]],
+  ['7,7,7,8,8,7,6,7,6,6,8,6,7,5', [9, 5]],
+  ['7,7,7,8,8,7,6,7,6,6,8,6,9,5', [7, 4]],
+  ['7,7,7,8,8,7,6,7,6,6,8,6,7,5,9,5', [8, 4]],
+  ['7,7,7,8,8,7,6,7,6,6,8,6,7,5,8,4', [6, 4]],
+  // 직지 8,8 6,6 이후 추가 변주
+  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5,6,5,5,6', [7, 6]],
+  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5,6,5,7,6', [4, 7]],
+  ['7,7,7,8,8,7,8,8,6,6,6,7', [5, 7]],
+  ['7,7,7,8,8,7,8,8,6,6,5,7', [8, 8]],
+  ['7,7,7,8,8,7,8,8,6,7,5,7', [6, 6]],
+  // --- 2수: 사지(8,7) 대비 ---
   ['7,7,8,7', [7, 8]],
   ['7,7,8,7,7,8', [6, 8]],
   ['7,7,8,7,6,8', [7, 8]],
@@ -53,39 +81,62 @@ const OPENING_BOOK_ENTRIES = [
   ['7,7,8,7,6,8,6,8', [8, 6]],
   ['7,7,8,7,7,8,6,8,8,6,7,9', [6, 7]],
   ['7,7,8,7,7,8,6,8,8,6,6,7', [8, 5]],
-  ['7,7,7,8,8,7,6,7,8,8,6,6', [5, 5]],
-  ['7,7,7,8,8,7,6,7,8,8,5,5', [7, 7]],
-  ['7,7,7,8,8,7,6,7,6,6,8,6', [7, 5]],
-  ['7,7,7,8,8,7,6,7,6,6,7,5', [9, 7]],
+  ['7,7,8,7,7,8,6,8,8,6,7,9,6,7', [5, 8]],
+  ['7,7,8,7,7,8,6,8,8,6,6,7,8,5', [7, 6]],
+  ['7,7,8,7,7,8,6,8,8,6,6,7,7,6', [9, 6]],
+  ['7,7,8,7,7,8,8,6,6,8,8,8', [7, 7]],
+  ['7,7,8,7,7,8,8,6,6,8,7,7', [9, 7]],
+  // --- 2수: 6,6 / 6,8 / 8,8 / 8,6 / 6,7 / 7,6 ---
   ['7,7,6,6', [7, 8]],
   ['7,7,6,6,7,8', [8, 7]],
   ['7,7,6,6,8,7', [7, 8]],
   ['7,7,6,6,7,8,8,7', [6, 7]],
   ['7,7,6,6,8,7,7,8', [6, 8]],
+  ['7,7,6,6,7,8,8,7,6,7', [8, 8]],
+  ['7,7,6,6,8,7,7,8,6,8', [8, 6]],
   ['7,7,6,8', [7, 8]],
   ['7,7,6,8,7,8', [8, 7]],
   ['7,7,6,8,8,7', [7, 8]],
+  ['7,7,6,8,7,8,8,7', [6, 8]],
+  ['7,7,6,8,8,7,7,8', [6, 7]],
   ['7,7,8,8', [7, 8]],
   ['7,7,8,8,7,8', [8, 7]],
   ['7,7,8,8,8,7', [7, 8]],
+  ['7,7,8,8,7,8,8,7', [6, 8]],
+  ['7,7,8,8,8,7,7,8', [6, 7]],
   ['7,7,8,6', [8, 7]],
   ['7,7,8,6,8,7', [7, 8]],
   ['7,7,8,6,7,8', [8, 7]],
+  ['7,7,8,6,8,7,7,8', [6, 7]],
+  ['7,7,8,6,7,8,8,7', [6, 8]],
   ['7,7,6,7', [7, 8]],
   ['7,7,6,7,7,8', [8, 7]],
   ['7,7,6,7,8,7', [7, 8]],
+  ['7,7,6,7,7,8,8,7', [6, 7]],
+  ['7,7,6,7,8,7,7,8', [6, 8]],
   ['7,7,7,6', [7, 8]],
   ['7,7,7,6,7,8', [8, 7]],
   ['7,7,7,6,8,7', [7, 8]],
-  ['7,7,7,8,8,7,6,7,8,8,6,6,5,5', [6, 5]],
-  ['7,7,7,8,8,7,6,7,8,8,6,6,6,5', [4, 6]],
-  ['7,7,7,8,8,7,6,7,6,6,8,6,7,5', [9, 5]],
-  ['7,7,7,8,8,7,6,7,6,6,8,6,9,5', [7, 4]],
+  ['7,7,7,6,7,8,8,7', [6, 7]],
+  ['7,7,7,6,8,7,7,8', [6, 8]],
+  // --- 2수: 변두리(5,5 / 9,9 / 5,7 등) ---
+  ['7,7,5,5', [7, 8]],
+  ['7,7,5,5,7,8', [8, 7]],
+  ['7,7,9,9', [7, 8]],
+  ['7,7,9,9,7,8', [8, 7]],
+  ['7,7,5,7', [7, 8]],
+  ['7,7,5,7,7,8', [8, 7]],
+  ['7,7,9,7', [7, 8]],
+  ['7,7,9,7,7,8', [8, 7]],
+  ['7,7,7,5', [7, 8]],
+  ['7,7,7,5,7,8', [8, 7]],
+  ['7,7,7,9', [7, 8]],
+  ['7,7,7,9,7,8', [8, 7]],
 ];
 
 const OPENING_BOOK = new Map(OPENING_BOOK_ENTRIES);
 /** 북에서 사용할 최대 수 개수 (이 수까지 북 적용, 그 이후는 엔진) */
-const BOOK_MAX_MOVES = 14;
+const BOOK_MAX_MOVES = 18;
 
 function bookKey(moveHistory) {
   if (!moveHistory || moveHistory.length === 0) return '';
@@ -103,6 +154,28 @@ function opponentOpenFourBlocks(b, oppColor) {
         if (pr >= 0 && pr < N && pc >= 0 && pc < N && b[pr][pc] === oppColor) continue;
         const { cnt, openF, openB } = scanLine(b, r, c, dr, dc, oppColor);
         if (cnt !== 4 || (openF + openB) < 1) continue;
+        let rr = r + dr, rc = c + dc;
+        while (inBound(rr, rc) && b[rr][rc] === oppColor) { rr += dr; rc += dc; }
+        if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+        rr = r - dr; rc = c - dc;
+        while (inBound(rr, rc) && b[rr][rc] === oppColor) { rr -= dr; rc -= dc; }
+        if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+      }
+    }
+  }
+  return set;
+}
+
+/** 상대 열린 3의 방어점 수집 — 이중목적(막기+공격) 수 판별용 */
+function opponentOpenThreeBlocks(b, oppColor) {
+  const set = new Set();
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (b[r][c] !== oppColor) continue;
+      for (const [dr, dc] of DIRS) {
+        const pr = r - dr, pc = c - dc;
+        if (pr >= 0 && pr < N && pc >= 0 && pc < N && b[pr][pc] === oppColor) continue;
+        if (lineType(b, r, c, dr, dc, oppColor) !== 'open3') continue;
         let rr = r + dr, rc = c + dc;
         while (inBound(rr, rc) && b[rr][rc] === oppColor) { rr += dr; rc += dc; }
         if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
@@ -134,7 +207,10 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
   }
   const opp = 3 - perspective;
   for (const key of opponentOpenFourBlocks(b, opp)) set.add(key);
+  for (const key of opponentOpenThreeBlocks(b, opp)) set.add(key);
   if (set.size === 0) return [[7, 7]];
+
+  const blockSet = new Set([...opponentOpenFourBlocks(b, opp), ...opponentOpenThreeBlocks(b, opp)]);
 
   const arr = [];
   for (const key of set) {
@@ -150,7 +226,8 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
       b[r][c] = 0;
     }
     const hist = history[r][c] || 0;
-    arr.push([r, c, wScore, bScore, hist]);
+    const isBlock = blockSet.has(key);
+    arr.push([r, c, wScore, bScore, hist, isBlock]);
   }
   const keyPers = perspective === BLACK ? (a) => 2 * a[3] + a[2] : (a) => 2 * a[2] + a[3];
   const killer0 = depth > 0 && killer[depth] ? killer[depth][0] : null;
@@ -163,6 +240,8 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
     if (killer1 && a[0] === killer1[0] && a[1] === killer1[1]) boostA += 50000;
     if (killer0 && b[0] === killer0[0] && b[1] === killer0[1]) boostB += 100000;
     if (killer1 && b[0] === killer1[0] && b[1] === killer1[1]) boostB += 50000;
+    if (a[5] && a[2] >= DUAL_PURPOSE_THRESHOLD) boostA += DUAL_PURPOSE_BONUS;
+    if (b[5] && b[2] >= DUAL_PURPOSE_THRESHOLD) boostB += DUAL_PURPOSE_BONUS;
     const scoreA = keyPers(a) * 1000 + boostA;
     const scoreB = keyPers(b) * 1000 + boostB;
     return scoreB - scoreA;

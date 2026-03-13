@@ -1,7 +1,7 @@
 /**
  * 보드 평가: 패턴 점수, evalBoard
  */
-import { N, WHITE, DIRS, S } from './constants.js';
+import { N, WHITE, BLACK, DIRS, S } from './constants.js';
 import { scanLine } from './rules.js';
 
 /** 한 패턴의 점수 (열린/닫힌 구분). 승리는 정확히 5목만 */
@@ -21,9 +21,11 @@ function isStrongPattern(cnt, opens) {
   return false;
 }
 
-/** 보드 전체 평가 (백 기준, 양수=백 유리). 다중 위협 시 보너스 */
+/** 보드 전체 평가 (백 기준, 양수=백 유리). 다중 위협 시 보너스 + 주도권(반격) 보너스 */
 export function evalBoard(b) {
   let score = 0;
+  let whiteInitiative = 0;
+  let blackInitiative = 0;
   for (let r = 0; r < N; r++) {
     for (let c = 0; c < N; c++) {
       const cell = b[r][c];
@@ -37,10 +39,15 @@ export function evalBoard(b) {
         const opens = openF + openB;
         const s = patternScore(cnt, opens, cell === WHITE);
         score += cell === WHITE ? s : -s;
-        if (isStrongPattern(cnt, opens)) strongDirs++;
+        if (isStrongPattern(cnt, opens)) {
+          strongDirs++;
+          if (cell === BLACK) blackInitiative++;
+          else whiteInitiative++;
+        }
       }
       if (strongDirs >= 2) score += cell === WHITE ? S.DOUBLE_THREAT : -S.DOUBLE_THREAT;
     }
   }
+  score += (whiteInitiative - blackInitiative) * S.INITIATIVE;
   return score;
 }
