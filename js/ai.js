@@ -1,9 +1,9 @@
 /**
  * AI: 최상급 엔진 — TT, 반복적 심화, VCF/VCT, 오프닝 북, 히스토리/킬러
  */
-import { N, WHITE, BLACK, S } from './constants.js';
+import { N, WHITE, BLACK, S, EMPTY } from './constants.js';
 import { inBound, copyBoard } from './board.js';
-import { scanLine, checkWin, forbidden, countFours, isInstantWin } from './rules.js';
+import { scanLine, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
 import { patternScore, evalBoard } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
 
@@ -18,6 +18,10 @@ for (let i = 0; i <= 20; i++) killer.push([null, null]);
 const MAX_CANDIDATES = 28;
 const MAX_DEPTH = 12;
 const BOOK_MAX_MOVES = 6;
+/** LMR: 이 수 이후부터 감소 탐색 시도. 감소 깊이로 컷되면 전깊이 재탐색 */
+const LMR_MOVE_THRESHOLD = 3;
+const LMR_MIN_DEPTH = 5;
+const LMR_REDUCTION = 2;
 /** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환해 페이지 멈춤 방지 (생각 시간 늘리면 더 강해짐) */
 const MAX_AI_MS = 6000;
 
@@ -42,8 +46,31 @@ function bookKey(moveHistory) {
   return moveHistory.map(([r, c]) => `${r},${c}`).join(',');
 }
 
+/** 상대 열린 4의 방어점(필수 응수)을 수집 — 후보수에 누락 방지 */
+function opponentOpenFourBlocks(b, oppColor) {
+  const set = new Set();
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (b[r][c] !== oppColor) continue;
+      for (const [dr, dc] of DIRS) {
+        const pr = r - dr, pc = c - dc;
+        if (pr >= 0 && pr < N && pc >= 0 && pc < N && b[pr][pc] === oppColor) continue;
+        const { cnt, openF, openB } = scanLine(b, r, c, dr, dc, oppColor);
+        if (cnt !== 4 || (openF + openB) < 1) continue;
+        let rr = r + dr, rc = c + dc;
+        while (inBound(rr, rc) && b[rr][rc] === oppColor) { rr += dr; rc += dc; }
+        if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+        rr = r - dr; rc = c - dc;
+        while (inBound(rr, rc) && b[rr][rc] === oppColor) { rr -= dr; rc -= dc; }
+        if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+      }
+    }
+  }
+  return set;
+}
+
 /**
- * 후보 수: 기존 돌 주변 2칸, 휴리스틱+히스토리+킬러 정렬, 상위 MAX_CANDIDATES개
+ * 후보 수: 기존 돌 주변 2칸 + 상대 열린4 방어점, 휴리스틱+히스토리+킬러 정렬, 상위 MAX_CANDIDATES개
  */
 export function candidates(b, perspective = WHITE, depth = 0, preferMove = null) {
   const set = new Set();
@@ -59,6 +86,8 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
       }
     }
   }
+  const opp = 3 - perspective;
+  for (const key of opponentOpenFourBlocks(b, opp)) set.add(key);
   if (set.size === 0) return [[7, 7]];
 
   const arr = [];
@@ -101,7 +130,7 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
   return raw;
 }
 
-/** 4목 위협에 대한 필수 응수 위치 (중복 제거) */
+/** 4목 위협에 대한 필수 응수 위치 (중복 제거). 즉승·더블포 판정용 */
 export function forcedReplies(b, r, c, color) {
   const set = new Set();
   for (const [dr, dc] of DIRS) {
@@ -117,7 +146,7 @@ export function forcedReplies(b, r, c, color) {
   return Array.from(set).map(key => [(key / N) | 0, key % N]);
 }
 
-/** VCF — 연속 4목/더블포 강제승 (후보 수 우선 탐색) */
+/** VCF — 열린 4만 강제로 간주 (렌주 정석). 즉승·더블포는 기존대로 */
 export function vcfWin(b, color, depth, candList = null) {
   if (depth <= 0) return null;
   const opp = 3 - color;
@@ -131,9 +160,9 @@ export function vcfWin(b, color, depth, candList = null) {
       b[r][c] = 0;
       return [r, c];
     }
-    const fourCount = countFours(b, r, c, color);
-    if (fourCount >= 1) {
-      const defMoves = forcedReplies(b, r, c, color);
+    const openFourCount = countOpenFours(b, r, c, color);
+    if (openFourCount >= 1) {
+      const defMoves = forcedRepliesOpenFour(b, r, c, color);
       let allWin = true;
       for (const [mr, mc] of defMoves) {
         if (b[mr][mc] !== 0) continue;
@@ -154,7 +183,7 @@ export function vcfWin(b, color, depth, candList = null) {
 
 const Exact = 0, Lower = 1, Upper = 2;
 
-/** Minimax + Alpha-Beta + TT + 히스토리/킬러 */
+/** Minimax + Alpha-Beta + TT + 히스토리/킬러 + LMR */
 function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
   const opp = 3 - aiColor;
   const rawScore = evalBoard(b);
@@ -172,12 +201,21 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
   let bestMove = null;
   let flag = Upper;
 
+  const reducedDepth = Math.max(1, depth - LMR_REDUCTION);
+
   if (isMax) {
-    for (const [r, c] of cands) {
+    for (let i = 0; i < cands.length; i++) {
+      const [r, c] = cands[i];
       if (aiColor === BLACK && forbidden(b, r, c)) continue;
       b[r][c] = aiColor;
       const h2 = updateHash(hash, r, c, aiColor);
-      const sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+      let sc;
+      if (depth >= LMR_MIN_DEPTH && i >= LMR_MOVE_THRESHOLD) {
+        sc = minimax(b, reducedDepth - 1, alpha, beta, false, aiColor, h2);
+        if (sc >= beta) sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+      } else {
+        sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+      }
       b[r][c] = 0;
       if (sc > bestScore) {
         bestScore = sc;
@@ -193,11 +231,18 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
       }
     }
   } else {
-    for (const [r, c] of cands) {
+    for (let i = 0; i < cands.length; i++) {
+      const [r, c] = cands[i];
       if (opp === BLACK && forbidden(b, r, c)) continue;
       b[r][c] = opp;
       const h2 = updateHash(hash, r, c, opp);
-      const sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+      let sc;
+      if (depth >= LMR_MIN_DEPTH && i >= LMR_MOVE_THRESHOLD) {
+        sc = minimax(b, reducedDepth - 1, alpha, beta, true, aiColor, h2);
+        if (sc <= alpha) sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+      } else {
+        sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+      }
       b[r][c] = 0;
       if (sc < bestScore) {
         bestScore = sc;

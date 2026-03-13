@@ -1,7 +1,7 @@
 /**
  * 렌주 규칙: 라인 분석, 승리 판정, 금수 판정
  */
-import { EMPTY, BLACK, WHITE, DIRS } from './constants.js';
+import { N, EMPTY, BLACK, WHITE, DIRS } from './constants.js';
 import { inBound } from './board.js';
 
 /**
@@ -84,6 +84,32 @@ export function countFours(b, r, c, color) {
     if (cnt === 4) n++;
   }
   return n;
+}
+
+/** 열린 4목만 셈 (VCF: 렌주에서 강제응수는 열린 4만) */
+export function countOpenFours(b, r, c, color) {
+  let n = 0;
+  for (const [dr, dc] of DIRS) {
+    const { cnt, openF, openB } = scanLine(b, r, c, dr, dc, color);
+    if (cnt === 4 && (openF + openB) >= 1) n++;
+  }
+  return n;
+}
+
+/** 열린 4목에 대한 필수 응수만 반환 (닫힌 4는 상대가 막지 않아도 됨) */
+export function forcedRepliesOpenFour(b, r, c, color) {
+  const set = new Set();
+  for (const [dr, dc] of DIRS) {
+    const { cnt, openF, openB } = scanLine(b, r, c, dr, dc, color);
+    if (cnt !== 4 || (openF + openB) < 1) continue;
+    let rr = r + dr, rc = c + dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr += dr; rc += dc; }
+    if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+    rr = r - dr; rc = c - dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr -= dr; rc -= dc; }
+    if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+  }
+  return Array.from(set).map(key => [(key / N) | 0, key % N]);
 }
 
 /** 한 수에 5목 또는 더블포(4목 2개 이상)면 true */

@@ -13,13 +13,22 @@ export function patternScore(cnt, opens, isAI) {
   return 0;
 }
 
-/** 보드 전체 평가 (백 기준, 양수=백 유리) */
+/** 한 방향이 강한 패턴(열린3·열린4·5목)인지 */
+function isStrongPattern(cnt, opens) {
+  if (cnt >= 5) return true;
+  if (cnt === 4 && opens >= 1) return true;
+  if (cnt === 3 && opens === 2) return true;
+  return false;
+}
+
+/** 보드 전체 평가 (백 기준, 양수=백 유리). 다중 위협 시 보너스 */
 export function evalBoard(b) {
   let score = 0;
   for (let r = 0; r < N; r++) {
     for (let c = 0; c < N; c++) {
       const cell = b[r][c];
       if (cell === 0) continue;
+      let strongDirs = 0;
       for (const [dr, dc] of DIRS) {
         const pr = r - dr, pc = c - dc;
         if (pr >= 0 && pr < N && pc >= 0 && pc < N && b[pr][pc] === cell) continue;
@@ -28,7 +37,9 @@ export function evalBoard(b) {
         const opens = openF + openB;
         const s = patternScore(cnt, opens, cell === WHITE);
         score += cell === WHITE ? s : -s;
+        if (isStrongPattern(cnt, opens)) strongDirs++;
       }
+      if (strongDirs >= 2) score += cell === WHITE ? S.DOUBLE_THREAT : -S.DOUBLE_THREAT;
     }
   }
   return score;
