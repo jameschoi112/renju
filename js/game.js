@@ -8,7 +8,12 @@ import { draw } from './draw.js';
 import { drawWinLine } from './draw.js';
 import { resetAI } from './ai.js';
 
-const aiWorker = new Worker(new URL('./ai.worker.js', import.meta.url), { type: 'module' });
+/** 다중 워커: 2개 병렬 실행 후 깊이 큰 결과 사용 (같은 시간에 탐색량·강도 향상) */
+const NUM_AI_WORKERS = 2;
+const AI_TIME_MS = 3000;
+const aiWorkers = Array.from({ length: NUM_AI_WORKERS }, () =>
+  new Worker(new URL('./ai.worker.js', import.meta.url), { type: 'module' })
+);
 
 export let board;
 /** 착수 순서 기록 (오프닝 북용) */
@@ -67,7 +72,7 @@ export function resetGame() {
   waitingForFirstMovePosition = false;
   hideToast();
   resetAI();
-  aiWorker.postMessage({ type: 'reset' });
+  aiWorkers.forEach((w) => w.postMessage({ type: 'reset' }));
   draw(getCtx(), board, lastMoveHuman, lastMoveAI, turn, gameOver);
   updateLegend();
   updateFirstButtons();
@@ -142,12 +147,21 @@ export function aiTurn() {
   aiThinking = true;
   showToast(aiColor === BLACK ? '흑(AI)이 수를 계산 중입니다…' : '백(AI)이 수를 계산 중입니다…');
 
-  const onResult = ({ data }) => {
-    aiWorker.onmessage = null;
+  const timeLimitPerWorker = Math.floor(AI_TIME_MS / NUM_AI_WORKERS);
+  const payload = {
+    board,
+    aiColor,
+    moveHistory,
+    timeLimitMs: timeLimitPerWorker,
+    returnDepth: true,
+  };
+
+  const onResult = (data) => {
     aiThinking = false;
     hideToast();
     try {
-      const [r, c] = data;
+      const move = Array.isArray(data) ? data : data.move;
+      const [r, c] = move;
       doPlace(board, r, c, aiColor);
       afterPlace(r, c, aiColor);
     } catch (err) {
@@ -165,8 +179,30 @@ export function aiTurn() {
     }
   };
 
-  aiWorker.onmessage = onResult;
-  aiWorker.postMessage({ board, aiColor, moveHistory });
+  if (NUM_AI_WORKERS <= 1) {
+    const w = aiWorkers[0];
+    w.onmessage = ({ data }) => {
+      w.onmessage = null;
+      onResult(data);
+    };
+    w.postMessage({ ...payload, timeLimitMs: AI_TIME_MS, returnDepth: false });
+    return;
+  }
+
+  const results = [];
+  const handler = (e) => {
+    results.push(e.data);
+    if (results.length < NUM_AI_WORKERS) return;
+    aiWorkers.forEach((w) => { w.onmessage = null; });
+    const best = results.reduce((a, b) =>
+      (b.depthReached ?? 0) > (a.depthReached ?? 0) ? b : a
+    );
+    onResult(best);
+  };
+  aiWorkers.forEach((w) => {
+    w.onmessage = handler;
+    w.postMessage(payload);
+  });
 }
 
 /** 화면 좌표 → 캔버스 좌표 (반응형 스케일 반영) */

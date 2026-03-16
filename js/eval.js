@@ -2,6 +2,7 @@
  * 보드 평가: 패턴 점수, evalBoard
  */
 import { N, WHITE, BLACK, DIRS, S } from './constants.js';
+import { inBound } from './board.js';
 import { scanLine } from './rules.js';
 
 /** 한 패턴의 점수 (열린/닫힌 구분). 승리는 정확히 5목만 */
@@ -33,6 +34,48 @@ function isStrongPattern(cnt, opens) {
 const CENTER = 7;
 function centerBonus(r, c) {
   return Math.max(0, 4 - Math.max(Math.abs(r - CENTER), Math.abs(c - CENTER)));
+}
+
+/**
+ * (r,c)에 color를 둔 뒤의 점수 변화량(백 기준). 보드 b에는 이미 b[r][c]=color가 반영된 상태로 호출.
+ * 한 수가 관여하는 4방향만 재계산해 노드당 평가 비용을 O(N²) → O(1) 수준으로 줄임.
+ */
+export function deltaEval(b, r, c, color) {
+  let delta = 0;
+  let open4Dirs = 0;
+  let open3Dirs = 0;
+  let strongDirs = 0;
+  const isWhite = color === WHITE;
+  const sign = isWhite ? 1 : -1;
+
+  for (const [dr, dc] of DIRS) {
+    const segPlus = inBound(r + dr, c + dc) ? scanLine(b, r + dr, c + dc, dr, dc, color) : { cnt: 0, openF: 0, openB: 0 };
+    const segMinus = inBound(r - dr, c - dc) ? scanLine(b, r - dr, c - dc, -dr, -dc, color) : { cnt: 0, openF: 0, openB: 0 };
+    const scoreBefore = patternScore(segPlus.cnt, segPlus.openF + segPlus.openB, isWhite)
+      + patternScore(segMinus.cnt, segMinus.openF + segMinus.openB, isWhite);
+
+    let startR = r;
+    let startC = c;
+    while (inBound(startR - dr, startC - dc) && b[startR - dr][startC - dc] === color) {
+      startR -= dr;
+      startC -= dc;
+    }
+    const merged = scanLine(b, startR, startC, dr, dc, color);
+    const opens = merged.openF + merged.openB;
+    const scoreAfter = patternScore(merged.cnt, opens, isWhite);
+    delta += sign * (scoreAfter - scoreBefore);
+
+    if (merged.cnt === 4 && opens >= 1) open4Dirs++;
+    if (merged.cnt === 3 && opens >= 2) open3Dirs++;
+    if (isStrongPattern(merged.cnt, opens)) strongDirs++;
+  }
+
+  delta += sign * (centerBonus(r, c) * 15);
+  if (strongDirs >= 2) delta += sign * S.DOUBLE_THREAT;
+  if (open4Dirs >= 1 && open3Dirs >= 1) delta += sign * S.FORK_OPEN4;
+  if (open3Dirs >= 2) delta += sign * S.CROSS_THREAT;
+  delta += sign * strongDirs * S.INITIATIVE;
+  return delta;
 }
 
 /** 보드 전체 평가 (백 기준, 양수=백 유리). 다중 위협 시 보너스 + 주도권(반격) 보너스 */

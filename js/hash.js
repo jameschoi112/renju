@@ -35,7 +35,7 @@ export function updateHash(h, r, c, color) {
   return (h ^ zobrist[index(r, c, color)]) >>> 0;
 }
 
-const TT_SIZE = 1 << 20; // 1M 엔트리
+const TT_SIZE = 1 << 22; // 4M 엔트리 (히트율·품질 향상)
 const TT_MASK = TT_SIZE - 1;
 const Exact = 0;
 const Lower = 1;

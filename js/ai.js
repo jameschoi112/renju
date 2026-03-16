@@ -4,7 +4,7 @@
 import { N, WHITE, BLACK, S, EMPTY } from './constants.js';
 import { inBound, copyBoard, getFirstEmptyCell } from './board.js';
 import { scanLine, lineType, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour, forcedRepliesOpenThree } from './rules.js';
-import { patternScore, evalBoard } from './eval.js';
+import { patternScore, evalBoard, deltaEval } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
 
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
@@ -38,6 +38,8 @@ const MAX_AI_MS = 3000;
 const WHITE_TIME_MULTIPLIER = 1.2;
 /** 반복적 심화 aspiration window: 이전 깊이 최선 점수 ± 이 값으로 먼저 탐색 후 실패 시 전폭 재탐색 */
 const ASPIRATION_MARGIN = 100000;
+/** MTD(f): 널 윈도우 반복 상한 (수치 안정성) */
+const MTD_MAX_ITER = 24;
 /** 막으면서 공격하는 수(이중목적) 보너스 — 우리 쪽 형태가 이 점수 이상일 때만 적용 */
 const DUAL_PURPOSE_THRESHOLD = S.C2;
 const DUAL_PURPOSE_BONUS = 80000;
@@ -399,10 +401,10 @@ export function vctWin(b, color, depth, candList = null, timeStart = null, timeL
 
 const Exact = 0, Lower = 1, Upper = 2;
 
-/** Minimax + Alpha-Beta + TT + 히스토리/킬러 + LMR */
-function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
+/** Minimax + Alpha-Beta + TT + 히스토리/킬러 + LMR. baseScore = 현재 보드의 백 기준 평가(증분용). */
+function minimax(b, depth, alpha, beta, isMax, aiColor, hash, baseScore) {
   const opp = 3 - aiColor;
-  const rawScore = evalBoard(b);
+  const rawScore = baseScore;
   const score = aiColor === WHITE ? rawScore : -rawScore;
 
   if (Math.abs(score) >= S.WIN) return score;
@@ -424,13 +426,14 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
       const [r, c] = cands[i];
       if (aiColor === BLACK && isForbiddenCached(b, r, c, hash)) continue;
       b[r][c] = aiColor;
+      const childBase = baseScore + deltaEval(b, r, c, aiColor);
       const h2 = updateHash(hash, r, c, aiColor);
       let sc;
       if (depth >= LMR_MIN_DEPTH && i >= LMR_MOVE_THRESHOLD) {
-        sc = minimax(b, reducedDepth - 1, alpha, beta, false, aiColor, h2);
-        if (sc >= beta) sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+        sc = minimax(b, reducedDepth - 1, alpha, beta, false, aiColor, h2, childBase);
+        if (sc >= beta) sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2, childBase);
       } else {
-        sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2);
+        sc = minimax(b, depth - 1, alpha, beta, false, aiColor, h2, childBase);
       }
       b[r][c] = 0;
       if (sc > bestScore) {
@@ -440,10 +443,11 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
         alpha = Math.max(alpha, sc);
       }
       if (beta <= alpha) {
+        ttPut(hash, depth, bestScore, Lower, bestMove);
         history[r][c] += depth * depth;
         killer[depth][1] = killer[depth][0];
         killer[depth][0] = [r, c];
-        break;
+        return bestScore;
       }
     }
   } else {
@@ -451,13 +455,14 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
       const [r, c] = cands[i];
       if (opp === BLACK && isForbiddenCached(b, r, c, hash)) continue;
       b[r][c] = opp;
+      const childBase = baseScore + deltaEval(b, r, c, opp);
       const h2 = updateHash(hash, r, c, opp);
       let sc;
       if (depth >= LMR_MIN_DEPTH && i >= LMR_MOVE_THRESHOLD) {
-        sc = minimax(b, reducedDepth - 1, alpha, beta, true, aiColor, h2);
-        if (sc <= alpha) sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+        sc = minimax(b, reducedDepth - 1, alpha, beta, true, aiColor, h2, childBase);
+        if (sc <= alpha) sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2, childBase);
       } else {
-        sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2);
+        sc = minimax(b, depth - 1, alpha, beta, true, aiColor, h2, childBase);
       }
       b[r][c] = 0;
       if (sc < bestScore) {
@@ -467,10 +472,11 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
         beta = Math.min(beta, sc);
       }
       if (beta <= alpha) {
+        ttPut(hash, depth, bestScore, Upper, bestMove);
         history[r][c] += depth * depth;
         killer[depth][1] = killer[depth][0];
         killer[depth][0] = [r, c];
-        break;
+        return bestScore;
       }
     }
   }
@@ -488,6 +494,60 @@ export function isCritical(b, r, c, color = WHITE) {
   return false;
 }
 
+/**
+ * 루트에서 주어진 창(alpha, beta)으로 한 번 탐색. MTD(f)용 널 윈도우 검색.
+ * @returns {{ score: number, move: [number, number] } | null} 타임아웃 시 null
+ */
+function rootSearchWithWindow(b, depth, alpha, beta, aiColor, rootBaseScore, ordered, startMs, timeLimitMs) {
+  let bestScore = -Infinity;
+  let bestMove = ordered[0];
+  const rootHash = getHash(b);
+
+  for (let i = 0; i < ordered.length; i++) {
+    if (isOverTime(startMs, timeLimitMs)) return bestMove ? { score: bestScore, move: bestMove } : null;
+    const [r, c] = ordered[i];
+    if (aiColor === BLACK && isForbiddenCached(b, r, c, rootHash)) continue;
+    b[r][c] = aiColor;
+    const childBase = rootBaseScore + deltaEval(b, r, c, aiColor);
+    const h = getHash(b);
+    const depthUse = isCritical(b, r, c, aiColor) ? Math.min(depth + 2, MAX_DEPTH) : depth;
+    const sc = minimax(b, depthUse - 1, alpha, beta, false, aiColor, h, childBase);
+    b[r][c] = 0;
+    if (sc > bestScore) {
+      bestScore = sc;
+      bestMove = [r, c];
+    }
+    if (sc >= beta) return { score: sc, move: [r, c] };
+    alpha = Math.max(alpha, sc);
+  }
+  return { score: bestScore, move: bestMove };
+}
+
+/**
+ * MTD(f): 첫 추정값 firstGuess 주변에서 널 윈도우 탐색을 반복해 정확한 점수로 수렴.
+ * @returns {{ score: number, move: [number, number] } | null}
+ */
+function mtdf(b, depth, firstGuess, aiColor, rootBaseScore, ordered, bestPos, startMs, timeLimitMs) {
+  let g = firstGuess;
+  let lower = -Infinity;
+  let upper = Infinity;
+  let bestMove = bestPos;
+  let iter = 0;
+
+  while (lower < upper && iter < MTD_MAX_ITER) {
+    if (isOverTime(startMs, timeLimitMs)) return bestMove ? { score: g, move: bestMove } : null;
+    const beta = g === lower ? g + 1 : g;
+    const res = rootSearchWithWindow(b, depth, beta - 1, beta, aiColor, rootBaseScore, ordered, startMs, timeLimitMs);
+    if (!res) return bestMove ? { score: g, move: bestMove } : null;
+    if (res.score < beta) upper = res.score;
+    else lower = res.score;
+    g = res.score;
+    bestMove = res.move;
+    iter++;
+  }
+  return { score: g, move: bestMove };
+}
+
 /** 게임 시작 시 TT·히스토리·캐시 초기화 (game에서 reset 시 호출 권장) */
 export function resetAI() {
   ttClear();
@@ -497,24 +557,31 @@ export function resetAI() {
 }
 
 /**
- * 최선 수 선택 (최상급): 오프닝 → 즉승 → 방어 → VCF → 상대 VCF 방어 → 반복적 심화 Minimax
- * 전체에 MAX_AI_MS 타임아웃 적용해 간헐적 멈춤 방지.
- * try-catch로 예외 시에도 유효한 수 반환해 페이지 크래시 방지.
+ * 최선 수 선택 (최상급): 오프닝 → 즉승 → 방어 → VCF → 상대 VCF 방어 → 반복적 심화 MTD(f)
+ * 전체에 timeLimitMs 타임아웃 적용. options.returnDepth 시 { move, depthReached } 반환 (다중 워커용).
  */
-export function bestMove(board, aiColor, moveHistory = []) {
+export function bestMove(board, aiColor, moveHistory = [], options = {}) {
+  const timeLimitMs = options.timeLimitMs ?? (aiColor === WHITE ? Math.round(MAX_AI_MS * WHITE_TIME_MULTIPLIER) : MAX_AI_MS);
+  const returnDepth = !!options.returnDepth;
   try {
-    return bestMoveInner(board, aiColor, moveHistory);
+    const move = bestMoveInner(board, aiColor, moveHistory, timeLimitMs);
+    if (returnDepth) {
+      const depthReached = bestMoveInner._lastDepthReached ?? 0;
+      return { move, depthReached };
+    }
+    return move;
   } catch (err) {
     console.error('AI bestMove 오류:', err);
-    return getFirstEmptyCell(board);
+    const fallback = getFirstEmptyCell(board);
+    return returnDepth ? { move: fallback, depthReached: 0 } : fallback;
   }
 }
 
-function bestMoveInner(board, aiColor, moveHistory) {
+function bestMoveInner(board, aiColor, moveHistory, timeLimitMs) {
   const opp = 3 - aiColor;
   const b = copyBoard(board);
   const startMs = Date.now();
-  const timeLimitMs = aiColor === WHITE ? Math.round(MAX_AI_MS * WHITE_TIME_MULTIPLIER) : MAX_AI_MS;
+  const limitMs = timeLimitMs ?? (aiColor === WHITE ? Math.round(MAX_AI_MS * WHITE_TIME_MULTIPLIER) : MAX_AI_MS);
 
   const key = bookKey(moveHistory);
   if (moveHistory.length <= BOOK_MAX_MOVES && OPENING_BOOK.has(key)) {
@@ -539,60 +606,41 @@ function bestMoveInner(board, aiColor, moveHistory) {
     b[r][c] = 0;
   }
 
-  if (!isOverTime(startMs, timeLimitMs)) {
-    const vcf = vcfWin(b, aiColor, 18, null, startMs, timeLimitMs);
+  if (!isOverTime(startMs, limitMs)) {
+    const vcf = vcfWin(b, aiColor, 18, null, startMs, limitMs);
     if (vcf) return vcf;
   }
 
   /** VCT: 열린4 연속으로 못 이기면, 열린3→방어→다음 위협(2~3수 앞)으로 허를 찌르는 수 탐색 */
-  if (!isOverTime(startMs, timeLimitMs)) {
-    const vct = vctWin(b, aiColor, 8, null, startMs, timeLimitMs);
+  if (!isOverTime(startMs, limitMs)) {
+    const vct = vctWin(b, aiColor, 8, null, startMs, limitMs);
     if (vct) return vct;
   }
 
   for (const [r, c] of cands) {
-    if (isOverTime(startMs, timeLimitMs)) break;
+    if (isOverTime(startMs, limitMs)) break;
     if (aiColor === BLACK && forbidden(b, r, c)) continue;
     const tmp = copyBoard(b);
     tmp[r][c] = opp;
-    if (vcfWin(tmp, opp, 12, null, startMs, timeLimitMs)) return [r, c];
+    if (vcfWin(tmp, opp, 12, null, startMs, limitMs)) return [r, c];
   }
 
   let bestPos = cands[0];
   let bestScore = -Infinity;
+  let depthReached = 0;
 
   for (let d = 2; d <= MAX_DEPTH; d += 2) {
-    if (Date.now() - startMs > timeLimitMs) break;
+    if (Date.now() - startMs > limitMs) break;
+    const rootBaseScore = evalBoard(b);
     const ordered = candidates(b, aiColor, 0, bestPos);
-    let depthBest = ordered[0];
-    let depthScore = -Infinity;
-
-    for (let i = 0; i < ordered.length; i++) {
-      const [r, c] = ordered[i];
-      if (Date.now() - startMs > timeLimitMs) break;
-      if (aiColor === BLACK && forbidden(b, r, c)) continue;
-      b[r][c] = aiColor;
-      const h = getHash(b);
-      const depthUse = isCritical(b, r, c, aiColor) ? Math.min(d + 2, MAX_DEPTH) : d;
-      let sc;
-      if (d > 2 && i === 0 && bestPos[0] === r && bestPos[1] === c) {
-        const alphaAsp = bestScore - ASPIRATION_MARGIN;
-        const betaAsp = bestScore + ASPIRATION_MARGIN;
-        sc = minimax(b, depthUse - 1, alphaAsp, betaAsp, false, aiColor, h);
-        if (sc <= alphaAsp) sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
-        if (sc >= betaAsp) sc = minimax(b, depthUse - 1, sc, Infinity, false, aiColor, h);
-      } else {
-        sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
-      }
-      b[r][c] = 0;
-      if (sc > depthScore) {
-        depthScore = sc;
-        depthBest = [r, c];
-      }
-    }
-    bestScore = depthScore;
-    bestPos = depthBest;
+    const firstGuess = d === 2 ? 0 : bestScore;
+    const res = mtdf(b, d, firstGuess, aiColor, rootBaseScore, ordered, bestPos, startMs, limitMs);
+    if (!res) break;
+    bestScore = res.score;
+    bestPos = res.move;
+    depthReached = d;
   }
 
+  bestMoveInner._lastDepthReached = depthReached;
   return bestPos;
 }
