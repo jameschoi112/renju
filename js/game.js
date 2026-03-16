@@ -11,6 +11,8 @@ import { resetAI } from './ai.js';
 /** 다중 워커: 2개 병렬 실행 후 깊이 큰 결과 사용 (같은 시간에 탐색량·강도 향상) */
 const NUM_AI_WORKERS = 2;
 const AI_TIME_MS = 3000;
+/** 계산 완료 후 실제 돌을 놓기까지의 연출용 지연 시간 (체감용) */
+const AI_MOVE_DELAY_MS = 2000;
 const aiWorkers = Array.from({ length: NUM_AI_WORKERS }, () =>
   new Worker(new URL('./ai.worker.js', import.meta.url), { type: 'module' })
 );
@@ -98,8 +100,8 @@ function updateLegend() {
   }
   if (infoEl) {
     infoEl.textContent = aiFirst
-      ? '흑(AI) vs 백(플레이어) · 렌주 규칙 · 흑 금수 적용'
-      : '흑(플레이어) vs 백(AI) · 렌주 규칙 · 흑 금수 적용';
+      ? '흑(AI) vs 백(플레이어)'
+      : '흑(플레이어) vs 백(AI)';
   }
 }
 
@@ -158,25 +160,27 @@ export function aiTurn() {
 
   const onResult = (data) => {
     aiThinking = false;
-    hideToast();
-    try {
-      const move = Array.isArray(data) ? data : data.move;
-      const [r, c] = move;
-      doPlace(board, r, c, aiColor);
-      afterPlace(r, c, aiColor);
-    } catch (err) {
-      console.error('AI 수 계산 중 오류:', err);
-      setStatus('AI 오류 발생, 복구 시도…');
+    setTimeout(() => {
       try {
-        const [fr, fc] = getFirstEmptyCell(board);
-        doPlace(board, fr, fc, aiColor);
-        afterPlace(fr, fc, aiColor);
-        setStatus(aiColor === BLACK ? '백의 차례' : '흑의 차례');
-      } catch (e2) {
-        console.error('AI 복구 실패:', e2);
-        setStatus('AI 오류 발생');
+        const move = Array.isArray(data) ? data : data.move;
+        const [r, c] = move;
+        doPlace(board, r, c, aiColor);
+        afterPlace(r, c, aiColor);
+      } catch (err) {
+        console.error('AI 수 계산 중 오류:', err);
+        setStatus('AI 오류 발생, 복구 시도…');
+        try {
+          const [fr, fc] = getFirstEmptyCell(board);
+          doPlace(board, fr, fc, aiColor);
+          afterPlace(fr, fc, aiColor);
+          setStatus(aiColor === BLACK ? '백의 차례' : '흑의 차례');
+        } catch (e2) {
+          console.error('AI 복구 실패:', e2);
+          setStatus('AI 오류 발생');
+        }
       }
-    }
+      hideToast();
+    }, AI_MOVE_DELAY_MS);
   };
 
   if (NUM_AI_WORKERS <= 1) {
