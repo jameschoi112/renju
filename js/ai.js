@@ -23,6 +23,8 @@ const LMR_MIN_DEPTH = 5;
 const LMR_REDUCTION = 2;
 /** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 (늘리면 더 강함, 전문가용 10000~15000) */
 const MAX_AI_MS = 12000;
+/** 반복적 심화 aspiration window: 이전 깊이 최선 점수 ± 이 값으로 먼저 탐색 후 실패 시 전폭 재탐색 */
+const ASPIRATION_MARGIN = 100000;
 /** 막으면서 공격하는 수(이중목적) 보너스 — 우리 쪽 형태가 이 점수 이상일 때만 적용 */
 const DUAL_PURPOSE_THRESHOLD = S.C2;
 const DUAL_PURPOSE_BONUS = 80000;
@@ -528,7 +530,7 @@ function bestMoveInner(board, aiColor, moveHistory) {
 
   /** VCT: 열린4 연속으로 못 이기면, 열린3→방어→다음 위협(2~3수 앞)으로 허를 찌르는 수 탐색 */
   if (!isOverTime(startMs, MAX_AI_MS)) {
-    const vct = vctWin(b, aiColor, 3, null, startMs, MAX_AI_MS);
+    const vct = vctWin(b, aiColor, 4, null, startMs, MAX_AI_MS);
     if (vct) return vct;
   }
 
@@ -549,13 +551,23 @@ function bestMoveInner(board, aiColor, moveHistory) {
     let depthBest = ordered[0];
     let depthScore = -Infinity;
 
-    for (const [r, c] of ordered) {
+    for (let i = 0; i < ordered.length; i++) {
+      const [r, c] = ordered[i];
       if (Date.now() - startMs > MAX_AI_MS) break;
       if (aiColor === BLACK && forbidden(b, r, c)) continue;
       b[r][c] = aiColor;
       const h = getHash(b);
       const depthUse = isCritical(b, r, c, aiColor) ? Math.min(d + 2, MAX_DEPTH) : d;
-      const sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
+      let sc;
+      if (d > 2 && i === 0 && bestPos[0] === r && bestPos[1] === c) {
+        const alphaAsp = bestScore - ASPIRATION_MARGIN;
+        const betaAsp = bestScore + ASPIRATION_MARGIN;
+        sc = minimax(b, depthUse - 1, alphaAsp, betaAsp, false, aiColor, h);
+        if (sc <= alphaAsp) sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
+        if (sc >= betaAsp) sc = minimax(b, depthUse - 1, sc, Infinity, false, aiColor, h);
+      } else {
+        sc = minimax(b, depthUse - 1, -Infinity, Infinity, false, aiColor, h);
+      }
       b[r][c] = 0;
       if (sc > depthScore) {
         depthScore = sc;
