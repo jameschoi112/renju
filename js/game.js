@@ -6,7 +6,9 @@ import { createBoard, boardFull, snap, inBound, getFirstEmptyCell } from './boar
 import { checkWin, forbidden } from './rules.js';
 import { draw } from './draw.js';
 import { drawWinLine } from './draw.js';
-import { bestMove, resetAI } from './ai.js';
+import { resetAI } from './ai.js';
+
+const aiWorker = new Worker(new URL('./ai.worker.js', import.meta.url), { type: 'module' });
 
 export let board;
 /** 착수 순서 기록 (오프닝 북용) */
@@ -65,6 +67,7 @@ export function resetGame() {
   waitingForFirstMovePosition = false;
   hideToast();
   resetAI();
+  aiWorker.postMessage({ type: 'reset' });
   draw(getCtx(), board, lastMoveHuman, lastMoveAI, turn, gameOver);
   updateLegend();
   updateFirstButtons();
@@ -138,9 +141,13 @@ export function aiTurn() {
   setStatus(aiColor === BLACK ? '흑(AI) 생각 중...' : '백(AI) 생각 중...');
   aiThinking = true;
   showToast(aiColor === BLACK ? '흑(AI)이 수를 계산 중입니다…' : '백(AI)이 수를 계산 중입니다…');
-  setTimeout(() => {
+
+  const onResult = ({ data }) => {
+    aiWorker.onmessage = null;
+    aiThinking = false;
+    hideToast();
     try {
-      const [r, c] = bestMove(board, aiColor, moveHistory);
+      const [r, c] = data;
       doPlace(board, r, c, aiColor);
       afterPlace(r, c, aiColor);
     } catch (err) {
@@ -155,13 +162,11 @@ export function aiTurn() {
         console.error('AI 복구 실패:', e2);
         setStatus('AI 오류 발생');
       }
-      aiThinking = false;
-      hideToast();
-      return;
     }
-    aiThinking = false;
-    hideToast();
-  }, 20);
+  };
+
+  aiWorker.onmessage = onResult;
+  aiWorker.postMessage({ board, aiColor, moveHistory });
 }
 
 /** 화면 좌표 → 캔버스 좌표 (반응형 스케일 반영) */

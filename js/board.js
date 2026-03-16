@@ -30,7 +30,7 @@ export function copyBoard(board) {
 export function boardFull(board) {
   for (let r = 0; r < N; r++) {
     for (let c = 0; c < N; c++) {
-      if (board[r][c] !== EMPTY) return false;
+      if (board[r][c] === EMPTY) return false;
     }
   }
   return true;

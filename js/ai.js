@@ -9,6 +9,17 @@ import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js
 
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 
+/** 금수 체크 결과 캐시 (minimax 내 반복 호출 감소) */
+const forbiddenCache = new Map();
+
+function isForbiddenCached(b, r, c, hash) {
+  const key = `${hash}:${r}:${c}`;
+  if (forbiddenCache.has(key)) return forbiddenCache.get(key);
+  const result = forbidden(b, r, c);
+  forbiddenCache.set(key, result);
+  return result;
+}
+
 // 히스토리 휴리스틱 (착수별 컷오프 기여도)
 const history = Array.from({ length: N }, () => new Int32Array(N));
 // 킬러 이동 (깊이별 최근 컷오프 수 2개)
@@ -21,10 +32,10 @@ const MAX_DEPTH = 12;
 const LMR_MOVE_THRESHOLD = 3;
 const LMR_MIN_DEPTH = 5;
 const LMR_REDUCTION = 2;
-/** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 (늘리면 더 강함, 전문가용 10000~15000) */
-const MAX_AI_MS = 12000;
+/** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 */
+const MAX_AI_MS = 3000;
 /** 백은 금수 없어 후보가 많아 탐색 폭이 넓음 → 같은 시간에 깊이 부족. 시간 보정 */
-const WHITE_TIME_MULTIPLIER = 1.4;
+const WHITE_TIME_MULTIPLIER = 1.2;
 /** 반복적 심화 aspiration window: 이전 깊이 최선 점수 ± 이 값으로 먼저 탐색 후 실패 시 전폭 재탐색 */
 const ASPIRATION_MARGIN = 100000;
 /** 막으면서 공격하는 수(이중목적) 보너스 — 우리 쪽 형태가 이 점수 이상일 때만 적용 */
@@ -273,7 +284,8 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
     const scoreB = keyPers(b) * 1000 + boostB;
     return scoreB - scoreA;
   });
-  const raw = arr.slice(0, MAX_CANDIDATES).map(([r, c]) => [r, c]);
+  const dynamicMax = depth <= 2 ? 12 : depth <= 4 ? 18 : MAX_CANDIDATES;
+  const raw = arr.slice(0, dynamicMax).map(([r, c]) => [r, c]);
   if (preferMove && !raw.some(([r, c]) => r === preferMove[0] && c === preferMove[1])) {
     const out = raw.slice(0, -1);
     out.unshift(preferMove);
@@ -410,7 +422,7 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
   if (isMax) {
     for (let i = 0; i < cands.length; i++) {
       const [r, c] = cands[i];
-      if (aiColor === BLACK && forbidden(b, r, c)) continue;
+      if (aiColor === BLACK && isForbiddenCached(b, r, c, hash)) continue;
       b[r][c] = aiColor;
       const h2 = updateHash(hash, r, c, aiColor);
       let sc;
@@ -437,7 +449,7 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
   } else {
     for (let i = 0; i < cands.length; i++) {
       const [r, c] = cands[i];
-      if (opp === BLACK && forbidden(b, r, c)) continue;
+      if (opp === BLACK && isForbiddenCached(b, r, c, hash)) continue;
       b[r][c] = opp;
       const h2 = updateHash(hash, r, c, opp);
       let sc;
@@ -476,9 +488,10 @@ export function isCritical(b, r, c, color = WHITE) {
   return false;
 }
 
-/** 게임 시작 시 TT·히스토리 초기화 (game에서 reset 시 호출 권장) */
+/** 게임 시작 시 TT·히스토리·캐시 초기화 (game에서 reset 시 호출 권장) */
 export function resetAI() {
   ttClear();
+  forbiddenCache.clear();
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) history[r][c] = 0;
   for (let i = 0; i < killer.length; i++) killer[i][0] = killer[i][1] = null;
 }
@@ -527,13 +540,13 @@ function bestMoveInner(board, aiColor, moveHistory) {
   }
 
   if (!isOverTime(startMs, timeLimitMs)) {
-    const vcf = vcfWin(b, aiColor, 8, null, startMs, timeLimitMs);
+    const vcf = vcfWin(b, aiColor, 18, null, startMs, timeLimitMs);
     if (vcf) return vcf;
   }
 
   /** VCT: 열린4 연속으로 못 이기면, 열린3→방어→다음 위협(2~3수 앞)으로 허를 찌르는 수 탐색 */
   if (!isOverTime(startMs, timeLimitMs)) {
-    const vct = vctWin(b, aiColor, 4, null, startMs, timeLimitMs);
+    const vct = vctWin(b, aiColor, 8, null, startMs, timeLimitMs);
     if (vct) return vct;
   }
 
@@ -542,7 +555,7 @@ function bestMoveInner(board, aiColor, moveHistory) {
     if (aiColor === BLACK && forbidden(b, r, c)) continue;
     const tmp = copyBoard(b);
     tmp[r][c] = opp;
-    if (vcfWin(tmp, opp, 6, null, startMs, timeLimitMs)) return [r, c];
+    if (vcfWin(tmp, opp, 12, null, startMs, timeLimitMs)) return [r, c];
   }
 
   let bestPos = cands[0];
