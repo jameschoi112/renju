@@ -1,3 +1,18 @@
 .DS_Store
 node_modules/
 *.log
+
+
+
+# Rust / WASM 빌드 산출물
+wasm/target/
+wasm/pkg/
+
+# JS 빌드 산출물(있다면)
+dist/
+build/
+
+# 기타 에디터/OS
+.vscode/
+.idea/
+.DS_Store

@@ -606,6 +606,37 @@ function bestMoveInner(board, aiColor, moveHistory, timeLimitMs) {
     b[r][c] = 0;
   }
 
+  // 상대가 이미 강한 열린3 위협을 가지고 있을 때,
+  // 우리에게 "즉각적인 강공"(즉승·더블포·열린4 이상)이 전혀 없다면 그때만 열린3을 우선적으로 막는다.
+  // 이렇게 하면 단순히 모든 열린3을 기계적으로 막지 않고,
+  // 우리가 먼저 강한 위협을 만들 수 있는 2~3수 앞 전술은 그대로 유지하면서
+  // 진짜로 수비가 최우선인 판면에서만 블럭이 강제된다.
+  {
+    const oppOpenThreeBlocks = opponentOpenThreeBlocks(b, opp);
+    if (oppOpenThreeBlocks.size > 0) {
+      let hasStrongAttack = false;
+      for (const [r, c] of cands) {
+        if (aiColor === BLACK && forbidden(b, r, c)) continue;
+        b[r][c] = aiColor;
+        const openFourCount = countOpenFours(b, r, c, aiColor);
+        const instant = isInstantWin(b, r, c, aiColor);
+        b[r][c] = 0;
+        if (instant || openFourCount >= 1) {
+          hasStrongAttack = true;
+          break;
+        }
+      }
+      if (!hasStrongAttack) {
+        for (const [r, c] of cands) {
+          const key = r * N + c;
+          if (!oppOpenThreeBlocks.has(key)) continue;
+          if (aiColor === BLACK && forbidden(b, r, c)) continue;
+          return [r, c];
+        }
+      }
+    }
+  }
+
   if (!isOverTime(startMs, limitMs)) {
     const vcf = vcfWin(b, aiColor, 18, null, startMs, limitMs);
     if (vcf) return vcf;

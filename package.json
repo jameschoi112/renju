@@ -1,0 +1,9 @@
+{
+  "name": "renju-gomoku",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:wasm": "wasm-pack build wasm --target web --out-dir js/pkg"
+  },
+  "description": "WASM 빌드에 wasm-pack 필요: cargo install wasm-pack"
+}

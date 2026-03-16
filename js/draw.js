@@ -35,7 +35,8 @@ export function draw(ctx, board, lastMoveHuman, lastMoveAI, turn, gameOver) {
     }
   }
 
-  if (turn === BLACK && !gameOver) {
+  // 흑 금수 자리(X)는 턴과 상관없이 항상 표시 (게임 끝난 뒤에는 숨김)
+  if (!gameOver) {
     for (let r = 0; r < N; r++) {
       for (let c = 0; c < N; c++) {
         if (board[r][c] !== 0) continue;
