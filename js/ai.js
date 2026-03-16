@@ -23,6 +23,8 @@ const LMR_MIN_DEPTH = 5;
 const LMR_REDUCTION = 2;
 /** AI 최대 연산 시간(ms). 초과 시 현재까지의 최선수 반환 (늘리면 더 강함, 전문가용 10000~15000) */
 const MAX_AI_MS = 12000;
+/** 백은 금수 없어 후보가 많아 탐색 폭이 넓음 → 같은 시간에 깊이 부족. 시간 보정 */
+const WHITE_TIME_MULTIPLIER = 1.4;
 /** 반복적 심화 aspiration window: 이전 깊이 최선 점수 ± 이 값으로 먼저 탐색 후 실패 시 전폭 재탐색 */
 const ASPIRATION_MARGIN = 100000;
 /** 막으면서 공격하는 수(이중목적) 보너스 — 우리 쪽 형태가 이 점수 이상일 때만 적용 */
@@ -261,8 +263,8 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
     if (killer1 && a[0] === killer1[0] && a[1] === killer1[1]) boostA += 50000;
     if (killer0 && b[0] === killer0[0] && b[1] === killer0[1]) boostB += 100000;
     if (killer1 && b[0] === killer1[0] && b[1] === killer1[1]) boostB += 50000;
-    if (a[5] && a[2] >= DUAL_PURPOSE_THRESHOLD) boostA += DUAL_PURPOSE_BONUS;
-    if (b[5] && b[2] >= DUAL_PURPOSE_THRESHOLD) boostB += DUAL_PURPOSE_BONUS;
+    if (a[5] && ourScore(a) >= DUAL_PURPOSE_THRESHOLD) boostA += DUAL_PURPOSE_BONUS;
+    if (b[5] && ourScore(b) >= DUAL_PURPOSE_THRESHOLD) boostB += DUAL_PURPOSE_BONUS;
     if (hasThreat) {
       boostA += ourScore(a) * ATTACK_BONUS_MUL;
       boostB += ourScore(b) * ATTACK_BONUS_MUL;
@@ -499,6 +501,7 @@ function bestMoveInner(board, aiColor, moveHistory) {
   const opp = 3 - aiColor;
   const b = copyBoard(board);
   const startMs = Date.now();
+  const timeLimitMs = aiColor === WHITE ? Math.round(MAX_AI_MS * WHITE_TIME_MULTIPLIER) : MAX_AI_MS;
 
   const key = bookKey(moveHistory);
   if (moveHistory.length <= BOOK_MAX_MOVES && OPENING_BOOK.has(key)) {
@@ -523,37 +526,37 @@ function bestMoveInner(board, aiColor, moveHistory) {
     b[r][c] = 0;
   }
 
-  if (!isOverTime(startMs, MAX_AI_MS)) {
-    const vcf = vcfWin(b, aiColor, 8, null, startMs, MAX_AI_MS);
+  if (!isOverTime(startMs, timeLimitMs)) {
+    const vcf = vcfWin(b, aiColor, 8, null, startMs, timeLimitMs);
     if (vcf) return vcf;
   }
 
   /** VCT: 열린4 연속으로 못 이기면, 열린3→방어→다음 위협(2~3수 앞)으로 허를 찌르는 수 탐색 */
-  if (!isOverTime(startMs, MAX_AI_MS)) {
-    const vct = vctWin(b, aiColor, 4, null, startMs, MAX_AI_MS);
+  if (!isOverTime(startMs, timeLimitMs)) {
+    const vct = vctWin(b, aiColor, 4, null, startMs, timeLimitMs);
     if (vct) return vct;
   }
 
   for (const [r, c] of cands) {
-    if (isOverTime(startMs, MAX_AI_MS)) break;
+    if (isOverTime(startMs, timeLimitMs)) break;
     if (aiColor === BLACK && forbidden(b, r, c)) continue;
     const tmp = copyBoard(b);
     tmp[r][c] = opp;
-    if (vcfWin(tmp, opp, 6, null, startMs, MAX_AI_MS)) return [r, c];
+    if (vcfWin(tmp, opp, 6, null, startMs, timeLimitMs)) return [r, c];
   }
 
   let bestPos = cands[0];
   let bestScore = -Infinity;
 
   for (let d = 2; d <= MAX_DEPTH; d += 2) {
-    if (Date.now() - startMs > MAX_AI_MS) break;
+    if (Date.now() - startMs > timeLimitMs) break;
     const ordered = candidates(b, aiColor, 0, bestPos);
     let depthBest = ordered[0];
     let depthScore = -Infinity;
 
     for (let i = 0; i < ordered.length; i++) {
       const [r, c] = ordered[i];
-      if (Date.now() - startMs > MAX_AI_MS) break;
+      if (Date.now() - startMs > timeLimitMs) break;
       if (aiColor === BLACK && forbidden(b, r, c)) continue;
       b[r][c] = aiColor;
       const h = getHash(b);
