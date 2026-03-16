@@ -3,7 +3,7 @@
  */
 import { N, WHITE, BLACK, S, EMPTY } from './constants.js';
 import { inBound, copyBoard, getFirstEmptyCell } from './board.js';
-import { scanLine, lineType, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour } from './rules.js';
+import { scanLine, lineType, checkWin, forbidden, countFours, countOpenFours, isInstantWin, forcedRepliesOpenFour, forcedRepliesOpenThree } from './rules.js';
 import { patternScore, evalBoard } from './eval.js';
 import { getHash, updateHash, ttGet, ttPut, ttGetMove, ttClear } from './hash.js';
 
@@ -188,6 +188,22 @@ function opponentOpenThreeBlocks(b, oppColor) {
   return set;
 }
 
+/** 보드에 color 쪽 열린3 또는 열린4가 하나라도 있으면 true (우리 위협 여부 판별) */
+function boardHasThreat(b, color) {
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (b[r][c] !== color) continue;
+      for (const [dr, dc] of DIRS) {
+        const pr = r - dr, pc = c - dc;
+        if (pr >= 0 && pr < N && pc >= 0 && pc < N && b[pr][pc] === color) continue;
+        const t = lineType(b, r, c, dr, dc, color);
+        if (t === 'open3' || t === 'open4') return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * 후보 수: 기존 돌 주변 2칸 + 상대 열린4 방어점, 휴리스틱+히스토리+킬러 정렬, 상위 MAX_CANDIDATES개
  */
@@ -230,6 +246,9 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
     arr.push([r, c, wScore, bScore, hist, isBlock]);
   }
   const keyPers = perspective === BLACK ? (a) => 2 * a[3] + a[2] : (a) => 2 * a[2] + a[3];
+  const hasThreat = boardHasThreat(b, perspective);
+  const ourScore = (a) => (perspective === BLACK ? a[3] : a[2]);
+  const ATTACK_BONUS_MUL = 5000;
   const killer0 = depth > 0 && killer[depth] ? killer[depth][0] : null;
   const killer1 = depth > 0 && killer[depth] ? killer[depth][1] : null;
   arr.sort((a, b) => {
@@ -242,6 +261,10 @@ export function candidates(b, perspective = WHITE, depth = 0, preferMove = null)
     if (killer1 && b[0] === killer1[0] && b[1] === killer1[1]) boostB += 50000;
     if (a[5] && a[2] >= DUAL_PURPOSE_THRESHOLD) boostA += DUAL_PURPOSE_BONUS;
     if (b[5] && b[2] >= DUAL_PURPOSE_THRESHOLD) boostB += DUAL_PURPOSE_BONUS;
+    if (hasThreat) {
+      boostA += ourScore(a) * ATTACK_BONUS_MUL;
+      boostB += ourScore(b) * ATTACK_BONUS_MUL;
+    }
     const scoreA = keyPers(a) * 1000 + boostA;
     const scoreB = keyPers(b) * 1000 + boostB;
     return scoreB - scoreA;
@@ -310,6 +333,50 @@ export function vcfWin(b, color, depth, candList = null, timeStart = null, timeL
       }
     }
     b[r][c] = 0;
+  }
+  return null;
+}
+
+/** VCT — 연속 위협 승리: 열린3 → 상대 방어 → 우리 다음 위협 … (2~3수 앞 읽어 허를 찌르는 수) */
+export function vctWin(b, color, depth, candList = null, timeStart = null, timeLimit = null) {
+  if (depth <= 0) return null;
+  if (isOverTime(timeStart, timeLimit)) return null;
+  const opp = 3 - color;
+  const order = candList || candidates(b, color, 0).slice(0, 28);
+
+  for (const [r, c] of order) {
+    if (isOverTime(timeStart, timeLimit)) return null;
+    if (b[r][c] !== 0) continue;
+    if (color === BLACK && forbidden(b, r, c)) continue;
+    b[r][c] = color;
+    if (isInstantWin(b, r, c, color)) {
+      b[r][c] = 0;
+      return [r, c];
+    }
+    const openFourDef = forcedRepliesOpenFour(b, r, c, color);
+    const openThreeDef = forcedRepliesOpenThree(b, r, c, color);
+    const defMoves = openFourDef.length > 0 ? openFourDef : openThreeDef;
+    if (defMoves.length === 0) {
+      b[r][c] = 0;
+      continue;
+    }
+    let allWin = true;
+    for (const [mr, mc] of defMoves) {
+      if (isOverTime(timeStart, timeLimit)) {
+        allWin = false;
+        break;
+      }
+      if (b[mr][mc] !== 0) continue;
+      b[mr][mc] = opp;
+      const w = vctWin(b, color, depth - 1, null, timeStart, timeLimit);
+      b[mr][mc] = 0;
+      if (!w) {
+        allWin = false;
+        break;
+      }
+    }
+    b[r][c] = 0;
+    if (allWin) return [r, c];
   }
   return null;
 }
@@ -396,10 +463,11 @@ function minimax(b, depth, alpha, beta, isMax, aiColor, hash) {
   return bestScore;
 }
 
+/** (r,c)에 color를 둔 뒤 열린3 또는 열린4를 만드는 수이면 true — 공격 라인에서 탐색 깊이 연장용 */
 export function isCritical(b, r, c, color = WHITE) {
   for (const [dr, dc] of DIRS) {
-    const { cnt } = scanLine(b, r, c, dr, dc, color);
-    if (cnt >= 3) return true;
+    const t = lineType(b, r, c, dr, dc, color);
+    if (t === 'open3' || t === 'open4') return true;
   }
   return false;
 }
@@ -456,6 +524,12 @@ function bestMoveInner(board, aiColor, moveHistory) {
   if (!isOverTime(startMs, MAX_AI_MS)) {
     const vcf = vcfWin(b, aiColor, 8, null, startMs, MAX_AI_MS);
     if (vcf) return vcf;
+  }
+
+  /** VCT: 열린4 연속으로 못 이기면, 열린3→방어→다음 위협(2~3수 앞)으로 허를 찌르는 수 탐색 */
+  if (!isOverTime(startMs, MAX_AI_MS)) {
+    const vct = vctWin(b, aiColor, 3, null, startMs, MAX_AI_MS);
+    if (vct) return vct;
   }
 
   for (const [r, c] of cands) {

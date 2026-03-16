@@ -112,6 +112,21 @@ export function forcedRepliesOpenFour(b, r, c, color) {
   return Array.from(set).map(key => [(key / N) | 0, key % N]);
 }
 
+/** 열린 3목에 대한 방어점(끝 막기) 반환 — VCT에서 상대 응수 후보 */
+export function forcedRepliesOpenThree(b, r, c, color) {
+  const set = new Set();
+  for (const [dr, dc] of DIRS) {
+    if (lineType(b, r, c, dr, dc, color) !== 'open3') continue;
+    let rr = r + dr, rc = c + dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr += dr; rc += dc; }
+    if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+    rr = r - dr; rc = c - dc;
+    while (inBound(rr, rc) && b[rr][rc] === color) { rr -= dr; rc -= dc; }
+    if (inBound(rr, rc) && b[rr][rc] === EMPTY) set.add(rr * N + rc);
+  }
+  return Array.from(set).map(key => [(key / N) | 0, key % N]);
+}
+
 /** 한 수에 5목 또는 더블포(4목 2개 이상)면 true */
 export function isInstantWin(b, r, c, color) {
   if (checkWin(b, r, c, color)) return true;
